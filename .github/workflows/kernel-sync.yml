@@ -1,0 +1,65 @@
+name: Sync Offical Kernel
+
+on:
+  workflow_dispatch:
+  schedule:
+  - cron: '0 3 * * *'
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout existing mirror repository
+      uses: actions/checkout@v4
+      with:
+        # --- THIS IS THE CRITICAL CHANGE ---
+        # Explicitly pass your custom secret token to the checkout action.
+        token: ${{ secrets.GH_TOKEN }}
+        # ------------------------------------
+
+        fetch-depth: 0 # We need full history for mirroring
+
+    - name: Add kernel.org remote
+      run: |
+        git remote add kernel-org https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
+        # Ensure the remote URL is correctly set if it exists from a previous run
+        git remote set-url kernel-org https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
+
+    - name: Fetch from kernel.org
+      run: |
+        echo "Fetching latest changes from kernel.org..."
+        # Fetch with tags and force-prune to ensure an accurate mirror
+        git fetch kernel-org --tags --force --prune || { echo "Failed to fetch from kernel.org"; exit 1; }
+
+    - name: Mirror branches and tags
+      run: |
+        echo "Mirroring branches..."
+        # Iterate through all remote kernel-org branches and push them to origin
+        for branch in $(git branch -r | grep kernel-org/ | sed 's/kernel-org\///' | grep -v HEAD); do
+          git push origin "kernel-org/${branch}:${branch}" || { echo "Failed to push branch ${branch}"; }
+        done
+
+        echo "Mirroring tags..."
+        # Push all fetched tags to origin
+        git push origin --tags || { echo "Failed to push tags"; }
+
+      env:
+        # Configure Git to use the token for subsequent push operations
+        # This sets up the remote URL to include the token for authentication
+        # Replace 'github.com' with your actual GitHub domain if you're on GitHub Enterprise
+        GITHUB_TOKEN_FOR_PUSH: ${{ secrets.GH_TOKEN }}
+        GIT_SSH_COMMAND: "ssh -o StrictHostKeyChecking=no" # Standard for SSH, but not primary for token auth
+
+    - name: Configure Git for Push (important for subsequent steps using Git directly)
+      run: |
+        # This command ensures that any subsequent `git push` commands in the same job
+        # authenticate using the GITHUB_TOKEN_FOR_PUSH environment variable.
+        git config --global url."https://oauth2:${GITHUB_TOKEN_FOR_PUSH}@github.com/".insteadOf "https://github.com/"
+      # Make sure this step runs BEFORE the "Mirror branches and tags" step
+      # If your runner version is newer, `actions/checkout` might handle this automatically,
+      # but it's a good explicit step for complex mirror operations.
+
+    - name: Clean up remote
+      run: |
+        git remote remove kernel-org
+      continue-on-error: true
