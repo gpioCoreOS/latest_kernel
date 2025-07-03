@@ -1,9 +1,9 @@
-name: Get LATEST Mirror Linus Kernel (x86_64)
+name: Get Latest Mirror Linus Kernel (x86_64)
 
 on:
-  workflow_dispatch: # Manuelles Auslösen
+  workflow_dispatch:
   schedule:
-    - cron: '0 3 * * *' # Täglich um 03:00 UTC ausführen (häufiger für den Hauptkernel)
+    - cron: '0 3 * * *'
 
 jobs:
   mirror_kernel:
@@ -12,22 +12,20 @@ jobs:
       - name: Checkout existing mirror repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GH_TOKEN }} # Dein Personal Access Token ist hier entscheidend!
-          fetch-depth: 0 # Volle Historie ist für das Spiegeln notwendig
+          token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 0
 
       - name: Configure Git for Push
         run: |
           echo "::group::Configuring Git for push operations"
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          # Konfiguriert Git, um den Token für HTTPS-Pushes zu verwenden
           git config --global url."https://oauth2:${{ secrets.GH_TOKEN }}@github.com/".insteadOf "https://github.com/"
           echo "::endgroup::"
 
       - name: Add kernel.org remote
         run: |
           echo -e "\e[36mAdding/Updating kernel.org remote...\e[0m"
-          # Wir nutzen hier den Haupt-Linux-Kernel-Tree von Linus Torvalds (x86_64 ist hier der Standard)
           git remote add kernel-org https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git || true
           git remote set-url kernel-org https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
           echo -e "\e[32mRemote 'kernel-org' eingerichtet.\e[0m"
@@ -35,28 +33,17 @@ jobs:
       - name: Fetch from kernel.org
         run: |
           echo -e "\e[36mFetching latest changes from kernel.org...\e[0m"
-          # Fetch mit Tags und force-prune, um eine exakte Spiegelung zu gewährleisten
           git fetch kernel-org --tags --force --prune || { echo "::error::Failed to fetch from kernel.org"; exit 1; }
           echo -e "\e[32mFetch abgeschlossen.\e[0m"
 
-      - name: Mirror all branches and tags to GitHub
-        run: |
-          echo -e "\e[36mMirroring all branches from kernel.org to origin...\e[0m"
-          # Push aller Remote-Branches als lokale Branches zu deinem GitHub-Repo
-          for branch in $(git branch -r | grep kernel-org/ | sed 's/kernel-org\///' | grep -v HEAD); do
-            echo -e "\e[37m  - Pushing branch:\e[0m \e[35m$branch\e[0m"
-            git push origin "kernel-org/${branch}:${branch}" || { echo "::warning::Failed to push branch ${branch}"; }
-          done
-
-          echo -e "\e[36mMirroring all tags from kernel.org to origin...\e[0m"
-          # Push aller Remote-Tags zu deinem GitHub-Repo
-          git push origin --tags || { echo "::warning::Failed to push tags"; }
-          echo -e "\e[32mMirroring abgeschlossen.\e[0m"
-
       - name: Get latest stable kernel version and date
-        id: get_version # ID, um Outputs in anderen Schritten nutzen zu können
+        id: get_version
         run: |
           echo "::group::Detecting latest stable kernel version"
+          
+          # Temporarily disable exit on error for cleanup commands
+          set +e 
+
           # Holen des neuesten stabilen Tags (vX.Y.Z) vom kernel.org Remote
           LATEST_STABLE_TAG=$(git ls-remote --tags --sort="-v:refname" kernel-org | grep -E 'refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 | sed 's/.*refs\/tags\///')
           if [ -z "$LATEST_STABLE_TAG" ]; then
@@ -71,54 +58,64 @@ jobs:
           echo -e "\e[34mCurrent Date:\e[0m \e[33m$CURRENT_DATE\e[0m"
           echo "current_date=$CURRENT_DATE" >> $GITHUB_OUTPUT
           echo "::endgroup::"
-        finally:
-          # Sicherstellen, dass das Git-Arbeitsverzeichnis in einem sauberen Zustand bleibt
+          
+          # Ensure cleanup happens even if previous commands failed
+          # git reset --hard HEAD and git clean -df are for ensuring the working directory
+          # is clean for the next step, which `actions/checkout` generally handles automatically
+          # but can be useful if you're doing complex in-place operations.
+          # For just getting output and not modifying the working tree, these aren't strictly necessary.
           git reset --hard HEAD || true
           git clean -df || true
+        # The 'finally' block was here. Its commands are now at the end of the 'run' block.
 
+
+      - name: Mirror all branches and tags to GitHub
+        run: |
+          echo -e "\e[36mMirroring all branches from kernel.org to origin...\e[0m"
+          for branch in $(git branch -r | grep kernel-org/ | sed 's/kernel-org\///' | grep -v HEAD); do
+            echo -e "\e[37m  - Pushing branch:\e[0m \e[35m$branch\e[0m"
+            git push origin "kernel-org/${branch}:${branch}" || { echo "::warning::Failed to push branch ${branch}"; }
+          done
+
+          echo -e "\e[36mMirroring all tags from kernel.org to origin...\e[0m"
+          git push origin --tags || { echo "::warning::Failed to push tags"; }
+          echo -e "\e[32mMirroring abgeschlossen.\e[0m"
 
       - name: Create version branch and tag in your repo (if new stable version)
         run: |
-          LATEST_TAG=${{ steps.get_version.outputs.latest_tag }}
+          KERNEL_VERSION=${{ steps.get_version.outputs.latest_tag }} # Use latest_tag output
           CURRENT_DATE=${{ steps.get_version.outputs.current_date }}
-          NEW_BRANCH_NAME="release-${LATEST_TAG}" # Branch-Name für die stabile Version
-          TAG_NAME="${LATEST_TAG}-${CURRENT_DATE}" # Tag-Name im Format vX.Y.Z-YYYY-MM-DD
+          NEW_BRANCH_NAME="release-${KERNEL_VERSION}"
+          TAG_NAME="${KERNEL_VERSION}-${CURRENT_DATE}"
 
           echo "::group::Creating specific version branch and tag"
           echo -e "\e[36mProcessing new release branch and tag...\e[0m"
           echo -e "\e[37m  New Branch Name:\e[0m \e[35m$NEW_BRANCH_NAME\e[0m"
           echo -e "\e[37m  New Tag Name:\e[0m \e[35m$TAG_NAME\e[0m"
 
-          # Überprüfe, ob der Release-Branch bereits existiert
           if git rev-parse --verify "$NEW_BRANCH_NAME" >/dev/null 2>&1; then
             echo -e "\e[33mBranch '$NEW_BRANCH_NAME' already exists. Skipping branch creation.\e[0m"
           else
-            echo -e "\e[32mCreating and pushing new branch '$NEW_BRANCH_NAME' from tag '$LATEST_TAG'...\e[0m"
-            # Erstelle den neuen Branch vom spezifischen Kernel-Tag von kernel.org
-            git branch "$NEW_BRANCH_NAME" "kernel-org/tags/$LATEST_TAG"
+            echo -e "\e[32mCreating and pushing new branch '$NEW_BRANCH_NAME' from tag '$KERNEL_VERSION'...\e[0m"
+            git branch "$NEW_BRANCH_NAME" "kernel-org/tags/$KERNEL_VERSION"
             git push origin "$NEW_BRANCH_NAME" || { echo "::error::Failed to push new branch $NEW_BRANCH_NAME"; exit 1; }
           fi
 
-          # Überprüfe, ob der Tag bereits existiert
           if git rev-parse --verify "refs/tags/$TAG_NAME" >/dev/null 2>&1; then
             echo -e "\e[33mTag '$TAG_NAME' already exists. Skipping tag creation.\e[0m"
           else
             echo -e "\e[32mCreating and pushing tag '$TAG_NAME'...\e[0m"
-            # Tag den Commit des spezifischen Kernel-Tags
-            git tag "$TAG_NAME" "kernel-org/tags/$LATEST_TAG"
+            git tag "$TAG_NAME" "kernel-org/tags/$KERNEL_VERSION"
             git push origin "$TAG_NAME" || { echo "::error::Failed to push tag $TAG_NAME"; exit 1; }
           fi
           echo -e "\e[32mBranch/Tag-Operationen abgeschlossen.\e[0m"
           echo "::endgroup::"
 
       - name: Create GitHub Release
-        # Führe dies nur aus, wenn der Tag tatsächlich neu erstellt wurde (optional, kann angepasst werden)
-        # Besser wäre es, zu prüfen, ob der TAG_NAME gerade gepusht wurde.
-        # Hier ist es eine Annahme, dass wir ein Release erstellen, wenn der Branch neu ist.
-        if: ${{ success() && steps.get_version.outputs.latest_tag != '' }} # Prüfe, ob ein Tag gefunden wurde
+        if: ${{ success() && steps.get_version.outputs.latest_tag != '' }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.get_version.outputs.latest_tag }}-${{ steps.get_version.outputs.current_date }} # Nutze den kombinierten Tag-Namen
+          tag_name: ${{ steps.get_version.outputs.latest_tag }}-${{ steps.get_version.outputs.current_date }}
           name: Linux Kernel ${{ steps.get_version.outputs.latest_tag }} (x86_64)
           body: |
             New Linux Kernel release for x86_64 based on stable tag ${{ steps.get_version.outputs.latest_tag }} from git.kernel.org.
@@ -127,7 +124,7 @@ jobs:
           draft: false
           prerelease: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }} # Benötigt für die Release Action
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
       - name: Clean up remote
         run: |
