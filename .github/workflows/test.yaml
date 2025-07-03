@@ -1,0 +1,20 @@
+name: Get Source Code
+
+on:
+  workflow_dispatch:
+
+
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout existing mirror repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Get Metadata and Smile
+        run: |
+          echo "\e[36mConsole > Started Test-Github Action/Workflow ... .. ."
