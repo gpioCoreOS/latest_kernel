@@ -1,4 +1,4 @@
-name: Mirror Linus Kernel (x86_64)
+name: Get LATEST Mirror Linus Kernel (x86_64)
 
 on:
   workflow_dispatch: # Manuelles Auslösen
