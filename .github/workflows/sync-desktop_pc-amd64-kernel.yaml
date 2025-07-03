@@ -1,4 +1,4 @@
-name: Mirror Linux Kernel
+name: Sync Linux Kernel for Desktop PC
 
 on:
   workflow_dispatch:
