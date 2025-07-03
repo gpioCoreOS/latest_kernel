@@ -1,0 +1,113 @@
+name: Build and Release ARM64 Kernel
+
+on:
+  workflow_dispatch: # Ermöglicht das manuelle Auslösen des Workflows
+  schedule:
+  - cron: '0 0 * * 0' # Optional: Jede Woche um Mitternacht UTC ausführen (Sonntag)
+
+jobs:
+  build_and_release:
+    runs-on: ubuntu-latest # Nutze den neuesten Ubuntu Runner
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4 # Cloned dein GitHub-Repository
+
+    - name: Set up Git LFS (if needed for large files)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git-lfs # Installiere Git LFS, falls du große Dateien im Kernel-Repo erwartest
+        git lfs install
+
+    - name: Get latest ARM64 Kernel Version and Download
+      id: get_kernel # Setze eine ID, um auf Outputs dieses Steps zugreifen zu können
+      run: |
+        # Finde die URL des neuesten ARM64-Kernels.
+        # Wir klonen temporär das Repository, um die Tags zu erhalten.
+        echo "Cloning temporary kernel repository to get latest version..."
+        git clone --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/arm64/linux.git temp_kernel_repo || { echo "Failed to clone kernel repo"; exit 1; }
+        cd temp_kernel_repo
+
+        # Finde den neuesten stabilen Kernel-Tag (z.B. v6.x)
+        # Greife direkt auf den neuesten Tag im Remote-Repo zu
+        LATEST_TAG=$(git ls-remote --tags --sort="-v:refname" origin | grep -E 'refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 | sed 's/.*refs\/tags\///')
+        echo "Latest ARM64 Kernel Tag found: $LATEST_TAG"
+
+        # Bestimme den Branch-Namen
+        BRANCH_NAME="kernel-${LATEST_TAG}"
+        echo "Branch name will be: $BRANCH_NAME"
+
+        # Überprüfe, ob der Branch bereits existiert, um Doppelungen zu vermeiden
+        # Hierfür müssen wir dein eigenes Repo abfragen
+        git fetch origin
+        if git branch -a | grep -q "remotes/origin/${BRANCH_NAME}"; then
+          echo "Branch '${BRANCH_NAME}' already exists. Skipping release."
+          echo "skip_release=true" >> "$GITHUB_OUTPUT"
+          exit 0 # Beende den Step erfolgreich, da nichts zu tun ist
+        fi
+
+        echo "PICO_SDK_PATH=${{ env.PICO_SDK_PATH }}" # Beispiel: Auf eine env Variable zugreifen
+
+        # Lade den Kernel Quellcode herunter
+        # Anstatt das gesamte Git-Repo zu klonen, können wir einen Tarball herunterladen,
+        # was oft schneller ist und weniger Platz auf dem Runner beansprucht.
+        # Die URL muss angepasst werden, da git.kernel.org keine direkten Tag-Tarballs anbietet.
+        # Stattdessen klonen wir jetzt das gesamte Repo (oder zumindest den Tag)
+        cd ../ # Zurück ins Root des GitHub-Repos
+        echo "Cloning full kernel repository for tag ${LATEST_TAG}..."
+        git clone --depth 1 --branch "$LATEST_TAG" https://git.kernel.org/pub/scm/linux/kernel/git/arm64/linux.git kernel_source || { echo "Failed to clone full kernel repo"; exit 1; }
+
+        # Setze Outputs für den nächsten Step
+        echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+        echo "branch_name=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
+        echo "skip_release=false" >> "$GITHUB_OUTPUT"
+
+    - name: Create new branch and Push
+      if: steps.get_kernel.outputs.skip_release == 'false' # Führe nur aus, wenn kein Skip ausgelöst wurde
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        # Wechsel zum neuen Branch
+        git checkout -b ${{ steps.get_kernel.outputs.branch_name }} || { echo "Failed to create or checkout new branch"; exit 1; }
+
+        # Kopiere den heruntergeladenen Kernel-Quellcode in den neuen Branch
+        # ACHTUNG: Dies überschreibt vorhandene Dateien im Root deines Repos!
+        # Du könntest stattdessen ein Unterverzeichnis verwenden (z.B. 'mkdir kernel && mv kernel_source/* kernel/')
+        mv kernel_source/* . || { echo "Failed to move kernel source"; exit 1; }
+        rm -rf kernel_source # Bereinige das temporäre Verzeichnis
+
+        # Füge alle neuen/geänderten Dateien hinzu
+        git add .
+
+        # Erstelle einen Commit
+        git commit -m "Add ARM64 Kernel ${{ steps.get_kernel.outputs.latest_tag }}" || echo "No changes to commit (already up-to-date or empty commit)."
+
+        # Pushe den neuen Branch und den Tag
+        git push origin ${{ steps.get_kernel.outputs.branch_name }} || { echo "Failed to push new branch"; exit 1; }
+
+        # Erstelle und pushe den Tag
+        git tag -a ${{ steps.get_kernel.outputs.latest_tag }} -m "ARM64 Kernel ${{ steps.get_kernel.outputs.latest_tag }}" || { echo "Failed to create tag (tag might already exist)"; exit 1; }
+        git push origin ${{ steps.get_kernel.outputs.latest_tag }} || { echo "Failed to push tag (tag might already exist)"; exit 1; }
+
+    - name: Create GitHub Release
+      if: steps.get_kernel.outputs.skip_release == 'false' # Führe nur aus, wenn kein Skip ausgelöst wurde
+      uses: softprops/action-gh-release@v2 # Nutze die Action zum Erstellen eines GitHub Releases
+      with:
+        tag_name: ${{ steps.get_kernel.outputs.latest_tag }}
+        name: ARM64 Kernel ${{ steps.get_kernel.outputs.latest_tag }}
+        body: |
+          New ARM64 Kernel release based on tag ${{ steps.get_kernel.outputs.latest_tag }} from git.kernel.org.
+          Source: https://git.kernel.org/pub/scm/linux/kernel/git/arm64/linux.git/tag/?h=${{ steps.get_kernel.outputs.latest_tag }}
+        draft: false
+        prerelease: false
+
+    # Optional: remove large kernel source if it was cloned to the main repo
+    - name: Cleanup
+      if: always() && steps.get_kernel.outputs.skip_release == 'false'
+      run: |
+        # Wenn der Kernel-Quellcode in dein Haupt-Repo geklont wurde,
+        # solltest du ihn vielleicht wieder entfernen, wenn er nur für den Build-Prozess benötigt wurde.
+        # Dies hängt von deiner Projektstruktur ab.
+        # rm -rf kernel_source # Falls du ihn in ein separates Unterverzeichnis geklont hast
+        echo "Cleanup complete."
