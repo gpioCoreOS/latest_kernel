@@ -1,0 +1,108 @@
+name: Fetch Latest Linux Kernel
+
+on:
+  workflow_dispatch: # Ermöglicht das manuelle Auslösen des Workflows
+  schedule:
+    - cron: '0 0 * * 0' # Optional: Einmal pro Woche (Sonntag, 00:00 UTC) ausführen
+
+jobs:
+  fetch_kernel:
+    runs-on: ubuntu-latest # Nutze den neuesten Ubuntu Runner
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4 # Klont dein eigenes GitHub-Repository auf den Runner.
+          fetch-depth: 0 # Holt die gesamte Historie, um Branches zu prüfen und zu pushen
+
+      - name: Get Latest Kernel Version
+        id: get_version # Setze eine ID, um auf Outputs dieses Steps zugreifen zu können
+        run: |
+          # Finde den neuesten stabilen Kernel-Tag (z.B. v6.x.y)
+          # 'ls-remote' fragt das Remote-Repo ab, ohne es zu klonen
+          LATEST_TAG=$(git ls-remote --tags --sort="-v:refname" https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git | grep -E 'refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 | sed 's/.*refs\/tags\///')
+          
+          if [ -z "$LATEST_TAG" ]; then
+            echo "Fehler: Konnte keinen aktuellen Kernel-Tag finden."
+            exit 1
+          fi
+
+          echo "Neuester Kernel-Tag gefunden: $LATEST_TAG"
+          
+          # Erstelle einen Branch-Namen aus dem Tag
+          BRANCH_NAME="linux-kernel-${LATEST_TAG}"
+          echo "Branch-Name wird sein: $BRANCH_NAME"
+
+          # Überprüfe, ob dieser Branch bereits in deinem Repository existiert
+          # 'git ls-remote' prüft hier dein eigenes GitHub-Repo
+          if git ls-remote --exit-code --heads origin "$BRANCH_NAME"; then
+            echo "Branch '${BRANCH_NAME}' existiert bereits. Überspringe weitere Schritte."
+            echo "skip_commit_and_push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Branch '${BRANCH_NAME}' existiert nicht. Fahre fort."
+            echo "skip_commit_and_push=false" >> "$GITHUB_OUTPUT"
+          fi
+          
+          # Setze Outputs für den nächsten Step
+          echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+          echo "branch_name=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Create and Checkout New Branch
+        # Dieser Schritt wird nur ausgeführt, wenn der Branch noch nicht existiert
+        if: steps.get_version.outputs.skip_commit_and_push == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Erstelle und wechsle zum neuen Branch
+          git checkout -b ${{ steps.get_version.outputs.branch_name }} || { echo "Fehler: Konnte Branch nicht erstellen/wechseln."; exit 1; }
+          echo "Neuen Branch '${{ steps.get_version.outputs.branch_name }}' erstellt und ausgecheckt."
+
+      - name: Download Kernel Source and Commit
+        # Dieser Schritt wird nur ausgeführt, wenn der Branch noch nicht existiert
+        if: steps.get_version.outputs.skip_commit_and_push == 'false'
+        run: |
+          KERNEL_TAG="${{ steps.get_version.outputs.latest_tag }}"
+          BRANCH_NAME="${{ steps.get_version.outputs.branch_name }}"
+          KERNEL_DIR="linux-kernel-${KERNEL_TAG}" # Verzeichnis für den Kernel-Quellcode
+
+          echo "Lade Kernel-Quellcode für Tag '$KERNEL_TAG' herunter..."
+          # Klone den spezifischen Tag des Kernels in ein neues Verzeichnis
+          git clone --depth 1 --branch "$KERNEL_TAG" https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git "$KERNEL_DIR" || { echo "Fehler: Konnte Kernel-Repository nicht klonen."; exit 1; }
+          echo "Kernel-Quellcode heruntergeladen nach $KERNEL_DIR"
+
+          # Füge den heruntergeladenen Kernel-Ordner zu Git hinzu
+          git add "$KERNEL_DIR" || { echo "Fehler: Konnte '$KERNEL_DIR' nicht zu Git hinzufügen."; exit 1; }
+
+          # Erstelle einen Commit
+          git commit -m "Add Linux Kernel $KERNEL_TAG" || echo "Keine Änderungen zum Committen." # 'echo' falls nichts zu committen ist
+
+          echo "Pushe den neuen Branch '${BRANCH_NAME}' zum GitHub-Repository..."
+          git push origin "$BRANCH_NAME" || { echo "Fehler: Konnte Branch nicht pushen."; exit 1; }
+          echo "Branch erfolgreich gepusht."
+
+      - name: Create GitHub Release
+        # Dieser Schritt wird nur ausgeführt, wenn der Branch neu erstellt und gepusht wurde
+        if: steps.get_version.outputs.skip_commit_and_push == 'false'
+        uses: softprops/action-gh-release@v2 # Nutze die Action zum Erstellen eines GitHub Releases
+        with:
+          tag_name: ${{ steps.get_version.outputs.latest_tag }} # Der Tag ist die Kernel-Version
+          name: Linux Kernel ${{ steps.get_version.outputs.latest_tag }}
+          body: |
+            Neues Linux Kernel Release ${{ steps.get_version.outputs.latest_tag }} von git.kernel.org/torvalds/linux.git.
+            Dieser Release enthält den Quellcode des offiziellen Linux-Kernels von Linus Torvalds.
+            
+            Original-Tag: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tag/?h=${{ steps.get_version.outputs.latest_tag }}
+          draft: false
+          prerelease: false
+
+      - name: Cleanup (Optional)
+        # Dieser Schritt wird immer ausgeführt, um das heruntergeladene Kernel-Repo zu entfernen
+        # wenn es nicht mehr benötigt wird, um den Runner-Speicher freizugeben.
+        if: always()
+        run: |
+          KERNEL_TAG="${{ steps.get_version.outputs.latest_tag }}"
+          KERNEL_DIR="linux-kernel-${KERNEL_TAG}"
+          if [ -d "$KERNEL_DIR" ]; then
+            echo "Bereinige temporären Kernel-Download-Ordner '$KERNEL_DIR'."
+            rm -rf "$KERNEL_DIR"
+          fi
